@@ -2,6 +2,8 @@ USE pt_booking;
 
 DELIMITER //
 
+DROP PROCEDURE IF EXISTS register_member //
+
 CREATE PROCEDURE register_member(
     IN p_name VARCHAR(10),
     IN p_phone VARCHAR(20),
@@ -10,6 +12,10 @@ CREATE PROCEDURE register_member(
 BEGIN
     INSERT INTO member (name, phone, birth_day)
     VALUES (p_name, p_phone, p_birth_day);
+
+    SELECT id, name, phone, birth_day, create_at
+    FROM member
+    WHERE id = LAST_INSERT_ID();
 END //
 
 DELIMITER ;
@@ -40,6 +46,8 @@ DELIMITER ;
 
 DELIMITER //
 
+DROP PROCEDURE IF EXISTS register_trainer //
+
 CREATE PROCEDURE register_trainer(
     IN p_name VARCHAR(10),
     IN p_phone VARCHAR(20),
@@ -49,6 +57,10 @@ CREATE PROCEDURE register_trainer(
 BEGIN
     INSERT INTO trainer (name, phone, birth_day, hire_date)
     VALUES (p_name, p_phone, p_birth_day, p_hire_date);
+
+    SELECT id, name, phone, birth_day, hire_date, create_at
+    FROM trainer
+    WHERE id = LAST_INSERT_ID();
 END //
 
 DELIMITER ;
@@ -79,6 +91,8 @@ DELIMITER ;
 -- F-05 수강권 구매 및 결제 기능
 
 DELIMITER //
+
+DROP PROCEDURE IF EXISTS purchase_ticket //
 
 CREATE PROCEDURE purchase_ticket(
     IN p_member_id INT,
@@ -118,6 +132,12 @@ BEGIN
     VALUES (v_ticket_id);
 
     COMMIT;
+
+    SELECT t.id, t.member_id, t.price, t.total_count,
+           t.remaining_count, t.start_date, t.expire_date, p.paid_at
+    FROM ticket t
+    JOIN payment p ON p.ticket_id = t.id
+    WHERE t.id = v_ticket_id;
 END //
 
 DELIMITER ;
@@ -136,8 +156,9 @@ CREATE PROCEDURE create_class(
     IN p_max_members INT
 )
 BEGIN
-    DECLARE v_trainer_count INT DEFAULT 0;
+    DECLARE v_trainer_id INT DEFAULT NULL;
     DECLARE v_overlap_count INT DEFAULT 0;
+    DECLARE v_class_id INT;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -148,21 +169,16 @@ BEGIN
     START TRANSACTION;
 
     -- 1. 트레이너 존재 확인 및 잠금
-    SELECT COUNT(*)
-    INTO v_trainer_count
-    FROM trainer
-    WHERE id = p_trainer_id;
-
-    IF v_trainer_count = 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = '존재하지 않는 트레이너입니다.';
-    END IF;
-
-    -- 같은 트레이너의 수업 동시 개설 방지
     SELECT id
+    INTO v_trainer_id
     FROM trainer
     WHERE id = p_trainer_id
     FOR UPDATE;
+
+    IF v_trainer_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = '존재하지 않는 트레이너입니다.';
+    END IF;
 
     -- 2. 시간 및 정원 검사
     IF p_start_at IS NULL
@@ -206,7 +222,12 @@ BEGIN
         'OPEN'
     );
 
+    SET v_class_id = LAST_INSERT_ID();
     COMMIT;
+
+    SELECT id, trainer_id, start_at, end_at, max_members, status
+    FROM class_session
+    WHERE id = v_class_id;
 END //
 
 DELIMITER ;
@@ -262,13 +283,17 @@ CREATE PROCEDURE book_class(
 )
 BEGIN
     DECLARE v_start_at DATETIME DEFAULT NULL;
+    DECLARE v_end_at DATETIME;
     DECLARE v_status VARCHAR(10);
     DECLARE v_max_members INT;
     DECLARE v_used_count INT DEFAULT 0;
 
     DECLARE v_remaining_count INT DEFAULT NULL;
+    DECLARE v_remaining_after INT;
     DECLARE v_start_date DATE;
     DECLARE v_expire_date DATE;
+    DECLARE v_member_id INT;
+    DECLARE v_locked_member_id INT;
 
     DECLARE v_payment_count INT DEFAULT 0;
     DECLARE v_duplicate_count INT DEFAULT 0;
@@ -283,8 +308,8 @@ BEGIN
     START TRANSACTION;
 
     -- 1. 수업 정보 확인 및 잠금
-    SELECT start_at, status, max_members
-    INTO v_start_at, v_status, v_max_members
+    SELECT start_at, end_at, status, max_members
+    INTO v_start_at, v_end_at, v_status, v_max_members
     FROM class_session
     WHERE id = p_class_id
     FOR UPDATE;
@@ -297,8 +322,8 @@ BEGIN
     END IF;
 
     -- 2. 이용권 정보 확인 및 잠금
-    SELECT remaining_count, start_date, expire_date
-    INTO v_remaining_count, v_start_date, v_expire_date
+    SELECT remaining_count, start_date, expire_date, member_id
+    INTO v_remaining_count, v_start_date, v_expire_date, v_member_id
     FROM ticket
     WHERE id = p_ticket_id
     FOR UPDATE;
@@ -309,6 +334,13 @@ BEGIN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = '사용할 수 없는 이용권입니다.';
     END IF;
+
+    -- 회원 단위로 직렬화해 서로 다른 이용권/수업의 동시 예약도 검사한다.
+    SELECT id
+    INTO v_locked_member_id
+    FROM member
+    WHERE id = v_member_id
+    FOR UPDATE;
 
     -- 3. 결제 여부 확인
     SELECT COUNT(*)
@@ -346,6 +378,21 @@ BEGIN
         SET MESSAGE_TEXT = '이미 예약한 수업입니다.';
     END IF;
 
+    SELECT COUNT(*)
+    INTO v_duplicate_count
+    FROM reservation r
+    JOIN ticket t ON t.id = r.ticket_id
+    JOIN class_session c ON c.id = r.class_session_id
+    WHERE t.member_id = v_member_id
+      AND r.status IN ('RESERVED', 'DONE', 'NO_SHOW')
+      AND c.start_at < v_end_at
+      AND c.end_at > v_start_at;
+
+    IF v_duplicate_count > 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = '같은 시간에 이미 예약한 수업이 있습니다.';
+    END IF;
+
     -- 6. 예약 생성
     INSERT INTO reservation (class_session_id, ticket_id)
     VALUES (p_class_id, p_ticket_id);
@@ -357,6 +404,8 @@ BEGIN
     SET remaining_count = remaining_count - 1
     WHERE id = p_ticket_id;
 
+    SET v_remaining_after = v_remaining_count - 1;
+
     -- 8. 정원이 차면 CLOSE로 변경
     IF v_used_count + 1 >= v_max_members THEN
         UPDATE class_session
@@ -367,13 +416,9 @@ BEGIN
     COMMIT;
 
     -- 9. 예약 결과 반환
-    SELECT
-        r.id AS reservation_id,
-        r.status AS reservation_status,
-        t.remaining_count
-    FROM reservation r
-    JOIN ticket t ON r.ticket_id = t.id
-    WHERE r.id = v_reservation_id;
+    SELECT v_reservation_id AS reservation_id,
+           'RESERVED' AS reservation_status,
+           v_remaining_after AS remaining_count;
 
 END //
 
