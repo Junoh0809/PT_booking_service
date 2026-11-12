@@ -8,6 +8,32 @@ CREATE INDEX idx_class_session_trainer_time
 CREATE INDEX idx_reservation_class_status
     ON reservation (class_session_id, status);
 
+-- 회원의 구매 횟수, 사용 횟수, 잔여 횟수를 한 번에 조회합니다.
+CREATE VIEW v_member_pt_summary AS
+SELECT
+    m.id AS member_id,
+    m.name AS member_name,
+    COALESCE(SUM(t.total_count), 0) AS total_pt_count,
+    COALESCE(SUM(t.total_count - t.remaining_count), 0) AS used_pt_count,
+    COALESCE(SUM(t.remaining_count), 0) AS remaining_pt_count
+FROM member m
+LEFT JOIN ticket t ON m.id = t.member_id
+GROUP BY m.id, m.name;
+
+-- 트레이너별 수업 수와 취소를 제외한 예약 결과를 집계합니다.
+CREATE VIEW v_trainer_class_summary AS
+SELECT
+    t.id AS trainer_id,
+    t.name AS trainer_name,
+    COUNT(DISTINCT c.id) AS total_classes,
+    COUNT(CASE WHEN r.status IN ('RESERVED', 'DONE', 'NO_SHOW') THEN 1 END) AS total_reservations,
+    COUNT(CASE WHEN r.status = 'DONE' THEN 1 END) AS completed_count,
+    COUNT(CASE WHEN r.status = 'NO_SHOW' THEN 1 END) AS no_show_count
+FROM trainer t
+LEFT JOIN class_session c ON t.id = c.trainer_id
+LEFT JOIN reservation r ON c.id = r.class_session_id
+GROUP BY t.id, t.name;
+
 DELIMITER //
 
 -- 새 수업을 OPEN으로 시작하고, 같은 트레이너의 수업 시간 중복을 막습니다.
@@ -108,7 +134,7 @@ END //
 -- 예약의 수업·이용권 교체와 취소·완료·노쇼 처리 후 상태 재변경을 막습니다.
 CREATE TRIGGER reservation_identity_guard
 BEFORE UPDATE ON reservation FOR EACH ROW
-BEGIN
+ BEGIN
     IF NEW.class_session_id <> OLD.class_session_id
        OR NEW.ticket_id <> OLD.ticket_id
        OR (OLD.status <> 'RESERVED' AND NEW.status <> OLD.status) THEN
