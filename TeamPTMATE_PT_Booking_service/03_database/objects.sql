@@ -242,12 +242,13 @@ DROP PROCEDURE IF EXISTS purchase_ticket //
 
 CREATE PROCEDURE purchase_ticket(
     IN p_member_id INT,
-    IN p_price INT,
-    IN p_total_count INT,
+    IN p_ticket_type_id INT,
     IN p_start_date DATE
 )
 BEGIN
     DECLARE v_ticket_id INT;
+    DECLARE v_price INT DEFAULT NULL;
+    DECLARE v_total_count INT DEFAULT NULL;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -257,8 +258,18 @@ BEGIN
 
     START TRANSACTION;
 
+    SELECT price, total_count INTO v_price, v_total_count
+    FROM ticket_type
+    WHERE id = p_ticket_type_id
+    FOR SHARE;
+
+    IF v_price IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '존재하지 않는 이용권 종류입니다.';
+    END IF;
+
     INSERT INTO ticket (
         member_id,
+        ticket_type_id,
         price,
         total_count,
         remaining_count,
@@ -266,9 +277,10 @@ BEGIN
     )
     VALUES (
         p_member_id,
-        p_price,
-        p_total_count,
-        p_total_count,
+        p_ticket_type_id,
+        v_price,
+        v_total_count,
+        v_total_count,
         p_start_date
     );
 
@@ -279,7 +291,7 @@ BEGIN
 
     COMMIT;
 
-    SELECT t.id, t.member_id, t.price, t.total_count,
+    SELECT t.id, t.member_id, t.ticket_type_id, t.price, t.total_count,
            t.remaining_count, t.start_date, t.expire_date, p.paid_at
     FROM ticket t
     JOIN payment p ON p.ticket_id = t.id

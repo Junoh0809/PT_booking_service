@@ -1,6 +1,12 @@
 -- schema.sql과 objects.sql을 적용한 새 DB에서 한 번 실행합니다.
 USE pt_booking;
 
+-- 이용권 종류 2개는 구매 전에 등록됩니다. 10회권은 아무도 구매하지 않아도 조회됩니다.
+INSERT INTO ticket_type (name, price, total_count)
+VALUES ('PT 5회권', 250000, 5),
+       ('PT 10회권', 450000, 10);
+SET @ticket_type_1 = (SELECT id FROM ticket_type WHERE name = 'PT 5회권');
+
 -- 회원 2명: 각각 이용권을 구매하고 같은 수업을 예약합니다.
 CALL register_member('김민지', '010-1000-0001', '1998-04-12');
 SET @member_1 = LAST_INSERT_ID();
@@ -13,10 +19,10 @@ SET @trainer_1 = LAST_INSERT_ID();
 CALL register_trainer('최유나', '010-2000-0002', '1992-11-03', '2022-07-01');
 SET @trainer_2 = LAST_INSERT_ID();
 
--- 회원마다 5회 이용권 1장씩 구매합니다. 예약 성공 시 잔여 횟수가 줄어듭니다.
-CALL purchase_ticket(@member_1, 250000, 5, CURRENT_DATE());
+-- 두 회원이 등록된 PT 5회권 종류를 선택해 한 장씩 구매합니다.
+CALL purchase_ticket(@member_1, @ticket_type_1, CURRENT_DATE());
 SELECT id INTO @ticket_1 FROM ticket WHERE member_id = @member_1 ORDER BY id DESC LIMIT 1;
-CALL purchase_ticket(@member_2, 250000, 5, CURRENT_DATE());
+CALL purchase_ticket(@member_2, @ticket_type_1, CURRENT_DATE());
 SELECT id INTO @ticket_2 FROM ticket WHERE member_id = @member_2 ORDER BY id DESC LIMIT 1;
 
 -- 두 수업은 같은 시간, 다른 트레이너입니다. 첫 수업은 정원 2명입니다.
@@ -36,7 +42,7 @@ CALL book_class(@class_1, @ticket_2);
 -- 예상 결과: class_1은 CLOSE(정원 마감), class_2는 OPEN, 이용권 잔여 횟수는 각각 4회입니다.
 SELECT id, trainer_id, start_at, max_members, status
 FROM class_session ORDER BY id;
-SELECT id, member_id, total_count, remaining_count
+SELECT id, member_id, ticket_type_id, price, total_count, remaining_count
 FROM ticket ORDER BY id;
 -- 예약 ID와 상태를 확인한 뒤 아래 추가 쿼리의 입력값으로 사용합니다.
 SELECT id, class_session_id, ticket_id, status
